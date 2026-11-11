@@ -15,8 +15,8 @@ struct Config: Codable {
     var startAtLogin: Bool?
     /// false on a brand-new install until the pairing window has been shown once.
     var welcomed: Bool?
-    /// Developer switch: let a locally signed (ad-hoc) build register itself as a login item, which
-    /// normally only Developer ID builds do. See LoginItem.isTeamSigned for why it is off.
+    /// Overrides whether this copy registers itself as a login item (see AppDelegate.selfRegisters):
+    /// true forces it on even next to install.sh's LaunchAgent, false turns it off.
     var selfRegister: Bool?
 
     static let dir: URL = {

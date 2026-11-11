@@ -12,11 +12,22 @@ import org.conscrypt.Conscrypt;
 import org.lsposed.hiddenapibypass.HiddenApiBypass;
 
 import java.io.InputStream;
+import java.net.Inet4Address;
+import java.net.InetAddress;
+import java.net.NetworkInterface;
 import java.nio.charset.StandardCharsets;
 import java.security.Security;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Enumeration;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 
 import io.github.muntashirakon.adb.AdbStream;
 
@@ -57,14 +68,62 @@ public final class WirelessHelper {
         cryptoReady = true;
     }
 
+    /** Which step of setup went wrong, so the user can be told what to do about it. */
+    public static final class SetupException extends Exception {
+        public enum Stage {NO_DIALOG, PAIR, LAUNCH}
+
+        public final Stage stage;
+
+        SetupException(Stage stage, String message, @Nullable Throwable cause) {
+            super(message, cause);
+            this.stage = stage;
+        }
+    }
+
     /**
-     * Pair with the phone's adbd, connect, and start the helper. Blocking; call off the main thread.
+     * Pair using the "Pair device with pairing code" dialog that is open on this phone right now,
+     * then connect and start the helper. Blocking; call off the main thread.
      *
-     * @param pairPort    the port from "Pair device with pairing code"
-     * @param code        the six-digit code from that dialog
-     * @param connectPort the Wireless debugging port (0 = discover over mDNS)
-     * @param configJson  config to drop in place first (pairing key + Mac hosts); null to leave as is
+     * @param code       the six-digit code from the dialog
+     * @param pairPort   the port from the dialog, or 0 to look it up (it changes every time the
+     *                   dialog opens, so it is looked up now and never remembered)
+     * @param configJson config to drop in place first (pairing key + Mac hosts); null to leave as is
      */
+    public static synchronized void pairAndLaunch(@NonNull Context context, @NonNull String code, int pairPort,
+                                     @Nullable String configJson, @NonNull Log log) throws SetupException {
+        String host;
+        int port = pairPort;
+        if (port <= 0) {
+            log.line("looking up the pairing port …");
+            Endpoint e = null;
+            try {
+                e = discoverEndpoint(context, PAIRING_SERVICE, 10000, log);
+            } catch (InterruptedException ignored) {
+            }
+            if (e == null) throw new SetupException(SetupException.Stage.NO_DIALOG, "pairing dialog not found", null);
+            host = e.host;
+            port = e.port;
+        } else {
+            // The pairing server listens on the Wi-Fi address, not on loopback.
+            host = ownIpv4();
+            if (host == null) host = "127.0.0.1";
+        }
+        try {
+            initCrypto();
+            log.line("pairing on port " + port + " …");
+            ClipAdbManager.getInstance(context).pair(host, port, code);
+            log.line("paired");
+        } catch (Throwable t) {
+            throw new SetupException(SetupException.Stage.PAIR, String.valueOf(t), t);
+        }
+        try {
+            connectAndLaunch(context, host, 0, configJson, log);
+        } catch (Throwable t) {
+            throw new SetupException(SetupException.Stage.LAUNCH, String.valueOf(t), t);
+        }
+    }
+
+    /** As above with everything given explicitly (used by the debug test hooks). */
     public static synchronized void pairAndLaunch(@NonNull Context context, @NonNull String host, int pairPort,
                                      @NonNull String code, int connectPort, @Nullable String configJson,
                                      @NonNull Log log) throws Exception {
@@ -87,7 +146,7 @@ public final class WirelessHelper {
         ClipAdbManager mgr = ClipAdbManager.getInstance(context);
         if (connectPort <= 0) {
             log.line("looking for adbd over mDNS …");
-            connectPort = discoverPort(context, CONNECT_SERVICE, 8000);
+            connectPort = discoverPort(context, CONNECT_SERVICE, 8000, log);
             if (connectPort <= 0) throw new IllegalStateException("Wireless debugging not found on this phone");
             log.line("found adbd on port " + connectPort);
         }
@@ -150,8 +209,10 @@ public final class WirelessHelper {
         StringBuilder s = new StringBuilder();
         s.append("D=/data/local/tmp/clipbridge; mkdir -p $D && chmod 700 $D; ");
         if (configJson != null) {
-            // The JSON is base64 key + numbers + host names: no single quotes, safe in a quoted heredoc.
-            s.append("cat > $D/config.json <<'CBCFG'\n").append(configJson).append("\nCBCFG\n");
+            // Written through a quoted heredoc, so nothing in it is interpreted by the shell. It must
+            // also be plain ASCII (see asciiJson): the Mac's name is in there, and names like
+            // "Sam’s MacBook" are not.
+            s.append("cat > $D/config.json <<'CBCFG'\n").append(asciiJson(configJson)).append("\nCBCFG\n");
             s.append("chmod 600 $D/config.json; ");
         }
         // Stop every earlier wrapper and helper, found by exact command line rather than by pid file
@@ -182,6 +243,29 @@ public final class WirelessHelper {
         return s.toString();
     }
 
+    /**
+     * The same JSON with every non-ASCII character written as a \\uXXXX escape.
+     *
+     * The adb library sizes the buffer for a command by its length in characters and then writes it
+     * as UTF-8, so one multi-byte character anywhere in the launch command (a curly apostrophe in
+     * the Mac's name is enough) overflows it. Non-ASCII can only occur inside JSON strings, where
+     * the escape means exactly the same thing.
+     */
+    static String asciiJson(@NonNull String json) {
+        StringBuilder out = new StringBuilder(json.length() + 16);
+        for (int i = 0; i < json.length(); i++) {
+            char c = json.charAt(i);
+            if (c >= 0x20 && c < 0x7F) {
+                out.append(c);
+            } else if (c == '\n' || c == '\r' || c == '\t') {
+                out.append(' '); // only ever between tokens; a raw newline would end the heredoc line
+            } else {
+                out.append(String.format("\\u%04x", (int) c));
+            }
+        }
+        return out.toString();
+    }
+
     /** A resolved adb mDNS service. */
     public static final class Endpoint {
         public final String host;
@@ -193,74 +277,198 @@ public final class WirelessHelper {
         }
     }
 
-    /** Resolve one instance of an adb mDNS service to its port. */
-    public static int discoverPort(@NonNull Context context, @NonNull String serviceType, long timeoutMs)
-            throws InterruptedException {
-        Endpoint e = discoverEndpoint(context, serviceType, timeoutMs);
+    /** The port of this phone's own instance of an adb mDNS service, or -1. */
+    public static int discoverPort(@NonNull Context context, @NonNull String serviceType, long timeoutMs,
+                                   @NonNull Log log) throws InterruptedException {
+        Endpoint e = discoverEndpoint(context, serviceType, timeoutMs, log);
         return e != null ? e.port : -1;
     }
 
-    /** Resolve one instance of an adb mDNS service to its host address and port. */
+    /**
+     * Find this phone's own instance of an adb mDNS service.
+     *
+     * mDNS shows every device on the network, and other phones with Wireless debugging on advertise
+     * the very same service types, so each candidate is resolved and kept only if its address is
+     * one of ours. Resolves run one at a time: before Android 14 the system rejects overlapping ones.
+     */
     @Nullable
-    public static Endpoint discoverEndpoint(@NonNull Context context, @NonNull String serviceType, long timeoutMs)
-            throws InterruptedException {
+    public static Endpoint discoverEndpoint(@NonNull Context context, @NonNull String serviceType, long timeoutMs,
+                                            @NonNull Log log) throws InterruptedException {
         NsdManager nsd = (NsdManager) context.getSystemService(Context.NSD_SERVICE);
         if (nsd == null) return null;
-        final java.util.concurrent.atomic.AtomicReference<Endpoint> result = new java.util.concurrent.atomic.AtomicReference<>();
-        CountDownLatch done = new CountDownLatch(1);
-
-        NsdManager.DiscoveryListener listener = new NsdManager.DiscoveryListener() {
-            @Override
-            public void onServiceFound(NsdServiceInfo info) {
-                try {
-                    nsd.resolveService(info, new NsdManager.ResolveListener() {
-                        @Override
-                        public void onServiceResolved(NsdServiceInfo resolved) {
-                            String host = resolved.getHost() != null ? resolved.getHost().getHostAddress() : null;
-                            if (host != null && result.compareAndSet(null, new Endpoint(host, resolved.getPort()))) {
-                                done.countDown();
-                            }
-                        }
-
-                        @Override
-                        public void onResolveFailed(NsdServiceInfo info, int errorCode) {
-                        }
-                    });
-                } catch (Throwable ignored) {
-                }
-            }
-
-            @Override
-            public void onServiceLost(NsdServiceInfo info) {
-            }
-
-            @Override
-            public void onDiscoveryStarted(String serviceType) {
-            }
-
-            @Override
-            public void onDiscoveryStopped(String serviceType) {
-            }
-
-            @Override
-            public void onStartDiscoveryFailed(String serviceType, int errorCode) {
-                done.countDown();
-            }
-
-            @Override
-            public void onStopDiscoveryFailed(String serviceType, int errorCode) {
-            }
-        };
-
-        nsd.discoverServices(serviceType, NsdManager.PROTOCOL_DNS_SD, listener);
+        Finder finder = new Finder(nsd, localAddresses());
         try {
-            done.await(timeoutMs, TimeUnit.MILLISECONDS);
+            nsd.discoverServices(serviceType, NsdManager.PROTOCOL_DNS_SD, finder);
+        } catch (Throwable t) {
+            log.line("mDNS discovery could not start: " + t);
+            return null;
+        }
+        try {
+            finder.done.await(timeoutMs, TimeUnit.MILLISECONDS);
         } finally {
             try {
-                nsd.stopServiceDiscovery(listener);
+                nsd.stopServiceDiscovery(finder);
             } catch (Throwable ignored) {
             }
         }
-        return result.get();
+        Endpoint e = finder.result;
+        log.line(serviceType + ": " + (e != null ? "found on port " + e.port : "not found on this phone")
+                + (finder.elsewhere > 0 ? " (" + finder.elsewhere + " on other devices ignored)" : "")
+                + (finder.failed > 0 ? " (" + finder.failed + " could not be resolved)" : ""));
+        return e;
+    }
+
+    private static final class Finder implements NsdManager.DiscoveryListener {
+        private final NsdManager nsd;
+        private final Set<InetAddress> mine;
+        private final ArrayDeque<NsdServiceInfo> pending = new ArrayDeque<>();
+        private final Map<String, Integer> attempts = new HashMap<>();
+        private boolean busy;
+        final CountDownLatch done = new CountDownLatch(1);
+        volatile Endpoint result;
+        volatile int elsewhere;
+        volatile int failed;
+
+        Finder(NsdManager nsd, Set<InetAddress> mine) {
+            this.nsd = nsd;
+            this.mine = mine;
+        }
+
+        @Override
+        public void onServiceFound(NsdServiceInfo info) {
+            synchronized (this) {
+                pending.add(info);
+            }
+            pump();
+        }
+
+        private void pump() {
+            final NsdServiceInfo info;
+            synchronized (this) {
+                if (busy || result != null) return;
+                info = pending.poll();
+                if (info == null) return;
+                busy = true;
+            }
+            try {
+                nsd.resolveService(info, new NsdManager.ResolveListener() {
+                    @Override
+                    public void onServiceResolved(NsdServiceInfo resolved) {
+                        String host = ownAddressOf(resolved);
+                        if (host != null) {
+                            result = new Endpoint(host, resolved.getPort());
+                            done.countDown();
+                        } else {
+                            elsewhere++;
+                        }
+                        next();
+                    }
+
+                    @Override
+                    public void onResolveFailed(NsdServiceInfo failedInfo, int errorCode) {
+                        retryLater(info);
+                        next();
+                    }
+                });
+            } catch (Throwable t) {
+                retryLater(info);
+                next();
+            }
+        }
+
+        private void retryLater(NsdServiceInfo info) {
+            synchronized (this) {
+                String name = String.valueOf(info.getServiceName());
+                Integer n = attempts.get(name);
+                int tries = n == null ? 1 : n + 1;
+                attempts.put(name, tries);
+                if (tries < 4) pending.add(info);
+                else failed++;
+            }
+        }
+
+        private void next() {
+            synchronized (this) {
+                busy = false;
+            }
+            pump();
+        }
+
+        /** The address to reach this service at if it is on this phone, else null. */
+        @Nullable
+        private String ownAddressOf(NsdServiceInfo resolved) {
+            List<InetAddress> addresses = new ArrayList<>();
+            if (Build.VERSION.SDK_INT >= 34) {
+                addresses.addAll(resolved.getHostAddresses());
+            } else if (resolved.getHost() != null) {
+                addresses.add(resolved.getHost());
+            }
+            if (addresses.isEmpty()) return null;
+            boolean ours = mine.isEmpty(); // could not list our own addresses: do not filter
+            for (InetAddress a : addresses) {
+                if (mine.contains(a)) ours = true;
+            }
+            if (!ours) return null;
+            for (InetAddress a : addresses) {
+                if (a instanceof Inet4Address) return a.getHostAddress();
+            }
+            String v4 = ownIpv4();
+            return v4 != null ? v4 : addresses.get(0).getHostAddress();
+        }
+
+        @Override
+        public void onServiceLost(NsdServiceInfo info) {
+        }
+
+        @Override
+        public void onDiscoveryStarted(String serviceType) {
+        }
+
+        @Override
+        public void onDiscoveryStopped(String serviceType) {
+        }
+
+        @Override
+        public void onStartDiscoveryFailed(String serviceType, int errorCode) {
+            done.countDown();
+        }
+
+        @Override
+        public void onStopDiscoveryFailed(String serviceType, int errorCode) {
+        }
+    }
+
+    /** Every address on this phone's own network interfaces. */
+    static Set<InetAddress> localAddresses() {
+        Set<InetAddress> out = new HashSet<>();
+        try {
+            Enumeration<NetworkInterface> interfaces = NetworkInterface.getNetworkInterfaces();
+            if (interfaces == null) return out;
+            for (NetworkInterface ni : Collections.list(interfaces)) {
+                out.addAll(Collections.list(ni.getInetAddresses()));
+            }
+        } catch (Throwable ignored) {
+        }
+        return out;
+    }
+
+    /** This phone's IPv4 address on the local network (Wi-Fi first), or null. */
+    @Nullable
+    static String ownIpv4() {
+        String fallback = null;
+        try {
+            Enumeration<NetworkInterface> interfaces = NetworkInterface.getNetworkInterfaces();
+            if (interfaces == null) return null;
+            for (NetworkInterface ni : Collections.list(interfaces)) {
+                if (ni.isLoopback() || !ni.isUp()) continue;
+                for (InetAddress a : Collections.list(ni.getInetAddresses())) {
+                    if (!(a instanceof Inet4Address)) continue;
+                    if (ni.getName().startsWith("wlan")) return a.getHostAddress();
+                    if (fallback == null && a.isSiteLocalAddress()) fallback = a.getHostAddress();
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return fallback;
     }
 }

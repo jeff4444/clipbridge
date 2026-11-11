@@ -44,7 +44,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * clipboard contents coming the other way. It has no UI and no Android Context.
  */
 public final class Main {
-    static final String VERSION = "0.1.0";
+    static final String VERSION = dev.clipbridge.BuildConfig.VERSION_NAME;
     /** The app file this helper was started from. It moves whenever the app is updated. */
     static final String APK = System.getenv("CLASSPATH");
     static final int STATUS_PORT = 47824;

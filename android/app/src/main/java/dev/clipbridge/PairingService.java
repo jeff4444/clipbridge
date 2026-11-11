@@ -16,27 +16,42 @@ import androidx.annotation.Nullable;
 import androidx.core.app.NotificationCompat;
 import androidx.core.app.RemoteInput;
 
+import java.net.ConnectException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
+import dev.clipbridge.adb.AdbKeyStore;
 import dev.clipbridge.adb.WirelessHelper;
+import dev.clipbridge.adb.WirelessHelper.SetupException;
 
 /**
- * Runs the one-time wireless pairing. The user opens Android's "Pair device with pairing code"
- * dialog; this service finds it over mDNS and shows a reply notification. The user swipes down the
- * shade — which keeps the dialog (and its pairing server) in the foreground — and types the code
- * into the notification. We then pair, connect, and launch the background helper.
+ * Runs the one-time wireless pairing.
+ *
+ * It puts up a notification with a reply field straight away. The user opens Android's "Pair device
+ * with pairing code" dialog, swipes down the shade (which, unlike switching apps, leaves the dialog
+ * and its pairing server alive) and types the code into the notification. Only then does the app
+ * look up the dialog's port, pair, connect and launch the background helper. Nothing here waits for
+ * or reacts to the dialog appearing: the port is random per dialog, so it is looked up fresh for
+ * every attempt and never remembered.
  */
 public final class PairingService extends Service {
     public static final String ACTION_START = "dev.clipbridge.START_PAIRING";
     public static final String ACTION_CODE = "dev.clipbridge.PAIRING_CODE";
     public static final String KEY_CODE = "code";
 
+    private static final String TAG = "ClipBridge";
     private static final String CHANNEL = "pairing";
     private static final int NOTIF = 1;
-    private static final long DISCOVERY_WINDOW_MS = 5 * 60 * 1000;
+    private static final long SESSION_MS = 10 * 60 * 1000;
+    /** "123456", or "123456 34967" (code, then the port shown in the dialog). */
+    private static final Pattern REPLY = Pattern.compile("^\\D*(\\d{6})(?:\\D+(\\d{4,5}))?\\D*$");
+
+    private static final String HOW = "In Settings › Developer options › Wireless debugging, tap "
+            + "“Pair device with pairing code”. Then swipe down and type the 6-digit code here.";
 
     /** Progress for any open SetupActivity to observe. */
-    public enum Phase {IDLE, WAITING_FOR_DIALOG, READY_FOR_CODE, PAIRING, SUCCESS, FAILED}
+    public enum Phase {IDLE, READY_FOR_CODE, PAIRING, SUCCESS, FAILED}
 
     public interface Observer {
         void onPhase(Phase phase, @Nullable String detail);
@@ -56,9 +71,9 @@ public final class PairingService extends Service {
     }
 
     private final Handler main = new Handler(Looper.getMainLooper());
-    private final AtomicBoolean discovering = new AtomicBoolean(false);
-    private volatile WirelessHelper.Endpoint pairingEndpoint;
-    private volatile boolean pairingInFlight;
+    private final AtomicBoolean pairing = new AtomicBoolean(false);
+    private final Runnable timeout = this::onTimeout;
+    private volatile boolean finished;
 
     @Nullable
     @Override
@@ -70,100 +85,132 @@ public final class PairingService extends Service {
     public int onStartCommand(Intent intent, int flags, int startId) {
         String action = intent != null ? intent.getAction() : ACTION_START;
         if (ACTION_CODE.equals(action)) {
-            String code = extractCode(intent);
-            onCode(code);
+            onReply(extractReply(intent));
             return START_NOT_STICKY;
         }
-        startForeground(NOTIF, buildNotification("Looking for the pairing dialog…",
-                "Open Developer options › Wireless debugging › Pair device with pairing code.", false));
-        setPhase(Phase.WAITING_FOR_DIALOG, null);
-        startDiscovery();
-        main.postDelayed(this::timeout, DISCOVERY_WINDOW_MS);
+        // Start, or start again after a failed attempt: same thing either way.
+        startForeground(NOTIF, buildNotification("Type the pairing code here", HOW, true));
+        finished = false;
+        if (!pairing.get()) setPhase(Phase.READY_FOR_CODE, null);
+        main.removeCallbacks(timeout);
+        main.postDelayed(timeout, SESSION_MS);
+        tryExistingKey();
         return START_NOT_STICKY;
     }
 
-    private void startDiscovery() {
-        if (!discovering.compareAndSet(false, true)) return;
+    /**
+     * If this app's key is already authorised on the phone (an earlier attempt paired but then
+     * failed to start the helper, or the app is being set up again), no code is needed at all.
+     */
+    private void tryExistingKey() {
+        if (!AdbKeyStore.exists(this)) return;
+        final String macConfig = new Prefs(this).macConfig();
         new Thread(() -> {
             try {
-                long deadline = System.currentTimeMillis() + DISCOVERY_WINDOW_MS;
-                while (discovering.get() && System.currentTimeMillis() < deadline && pairingEndpoint == null) {
-                    WirelessHelper.Endpoint e = WirelessHelper.discoverEndpoint(
-                            this, WirelessHelper.PAIRING_SERVICE, 4000);
-                    if (e != null) {
-                        pairingEndpoint = e;
-                        main.post(() -> {
-                            setPhase(Phase.READY_FOR_CODE, null);
-                            notifyNow("Enter the 6-digit code",
-                                    "Swipe down and type the pairing code shown on your phone.", true);
-                        });
-                        return;
-                    }
-                    Thread.sleep(500);
-                }
-            } catch (InterruptedException ignored) {
+                WirelessHelper.connectAndLaunch(this, "127.0.0.1", 0, macConfig, m -> log("existing key: " + m));
+                log("existing key: already authorised, no code needed");
+                main.post(this::succeed);
+            } catch (Throwable t) {
+                log("existing key: not usable yet (" + t + ")");
             }
-        }, "pairing-discovery").start();
+        }, "pairing-existing-key").start();
     }
 
-    private void onCode(@Nullable String code) {
-        if (code == null || !code.matches("\\d{6}")) {
-            notifyNow("That code didn't look right", "Enter the 6 digits exactly as shown.", true);
+    private void onReply(@Nullable String reply) {
+        if (finished) return;
+        Matcher m = reply != null ? REPLY.matcher(reply) : null;
+        if (m == null || !m.matches()) {
+            notifyNow("That didn’t look like the code", "Type the 6 digits shown in the pairing dialog.", true);
             return;
         }
-        WirelessHelper.Endpoint endpoint = pairingEndpoint;
-        if (endpoint == null) {
-            notifyNow("Open the pairing dialog first",
-                    "Tap 'Pair device with pairing code', then type the code here.", true);
-            return;
-        }
-        if (pairingInFlight) return;
-        pairingInFlight = true;
+        final String code = m.group(1);
+        final int port = m.group(2) != null ? Integer.parseInt(m.group(2)) : 0;
+        if (!pairing.compareAndSet(false, true)) return;
         setPhase(Phase.PAIRING, null);
         notifyNow("Pairing…", "Setting up ClipBridge.", false);
-        final String macConfig = new Prefs(this).macConfig(); // from the Mac's QR; writes config.json
+        final String macConfig = new Prefs(this).macConfig(); // from the Mac's QR; becomes config.json
         new Thread(() -> {
             try {
-                WirelessHelper.pairAndLaunch(this, endpoint.host, endpoint.port, code, 0, macConfig,
-                        m -> android.util.Log.i("ClipBridge", "pair: " + m));
-                new Prefs(this).setPaired(true);
-                Reconnector.scheduleWatchdog(this); // keep it alive across reboots from now on
-                main.post(() -> {
-                    setPhase(Phase.SUCCESS, null);
-                    notifyNow("ClipBridge is set up", "Copy on either device — it just syncs now.", false);
-                    stop();
-                });
+                WirelessHelper.pairAndLaunch(this, code, port, macConfig, msg -> log("pair: " + msg));
+                main.post(this::succeed);
             } catch (Throwable t) {
-                pairingInFlight = false;
+                android.util.Log.w(TAG, "pairing failed", t);
+                final String why = explain(t);
                 main.post(() -> {
-                    setPhase(Phase.FAILED, friendly(t));
-                    notifyNow("Pairing failed", friendly(t) + " Make sure the dialog is still open, then try again.", true);
+                    pairing.set(false);
+                    if (finished) return;
+                    setPhase(Phase.FAILED, why);
+                    notifyNow("Pairing didn’t work", why, true);
                 });
             }
         }, "pairing").start();
     }
 
-    private static String friendly(Throwable t) {
-        String m = t.getMessage();
-        if (m == null) m = t.getClass().getSimpleName();
-        if (m.contains("Exchanging message") || m.contains("peer info")) return "Wrong code.";
-        if (m.contains("ECONNREFUSED") || m.contains("refused")) return "The pairing dialog closed.";
-        return m;
+    private void succeed() {
+        if (finished) return;
+        finished = true;
+        pairing.set(false);
+        main.removeCallbacks(timeout);
+        new Prefs(this).setPaired(true);
+        Reconnector.scheduleWatchdog(this); // keep it alive across reboots from now on
+        setPhase(Phase.SUCCESS, null);
+        notifyNow("ClipBridge is set up", "Copy on either device — it just syncs now.", false);
+        main.postDelayed(() -> {
+            stopForeground(Service.STOP_FOREGROUND_DETACH);
+            stopSelf();
+        }, 2500);
     }
 
-    private void timeout() {
-        if (phase == Phase.WAITING_FOR_DIALOG || phase == Phase.READY_FOR_CODE) {
-            setPhase(Phase.FAILED, "Timed out");
-            stop();
+    private void onTimeout() {
+        if (finished || pairing.get()) return;
+        finished = true;
+        setPhase(Phase.FAILED, "Timed out. Tap Start pairing to try again.");
+        stopForeground(Service.STOP_FOREGROUND_REMOVE);
+        stopSelf();
+    }
+
+    /** What went wrong, and what to do about it, in the user's terms. */
+    private static String explain(Throwable t) {
+        if (!(t instanceof SetupException)) return "Something went wrong (" + shortName(t) + "). Try again.";
+        SetupException e = (SetupException) t;
+        switch (e.stage) {
+            case NO_DIALOG:
+                return "Couldn’t find the pairing dialog. Check that “Pair device with pairing code” is open, "
+                        + "then type the code again. If this keeps happening, type the code and then the "
+                        + "port, which is the number after the colon in the dialog: 123456 34567";
+            case PAIR:
+                if (refused(e)) {
+                    return "The pairing dialog had closed, or that port was wrong. Open “Pair device with "
+                            + "pairing code” again and type the new code.";
+                }
+                return "That code wasn’t accepted. Open “Pair device with pairing code” again and type the "
+                        + "new code.";
+            case LAUNCH:
+            default:
+                return "Paired, but ClipBridge couldn’t start its helper (" + shortName(e.getCause()) + "). "
+                        + "Check that Wireless debugging is still on, then tap Start pairing in ClipBridge "
+                        + "again. No new code is needed.";
         }
     }
 
-    private void stop() {
-        discovering.set(false);
-        main.postDelayed(() -> {
-            stopForeground(phase == Phase.SUCCESS ? Service.STOP_FOREGROUND_DETACH : Service.STOP_FOREGROUND_REMOVE);
-            stopSelf();
-        }, phase == Phase.SUCCESS ? 2500 : 0);
+    private static boolean refused(Throwable t) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            if (c instanceof ConnectException) return true;
+            String m = c.getMessage();
+            if (m != null && (m.contains("ECONNREFUSED") || m.contains("refused"))) return true;
+        }
+        return false;
+    }
+
+    private static String shortName(@Nullable Throwable t) {
+        if (t == null) return "unknown error";
+        String m = t.getMessage();
+        String name = t.getClass().getSimpleName();
+        return m == null || m.isEmpty() ? name : name + ": " + (m.length() > 80 ? m.substring(0, 80) + "…" : m);
+    }
+
+    private static void log(String message) {
+        android.util.Log.i(TAG, "setup: " + message);
     }
 
     // notifications ---------------------------------------------------------
@@ -202,7 +249,7 @@ public final class PairingService extends Service {
     }
 
     @Nullable
-    private static String extractCode(Intent intent) {
+    private static String extractReply(Intent intent) {
         android.os.Bundle results = RemoteInput.getResultsFromIntent(intent);
         if (results != null) {
             CharSequence c = results.getCharSequence(KEY_CODE);
@@ -220,16 +267,16 @@ public final class PairingService extends Service {
     }
 
     /**
-     * Deliver a reply code to the running service (from PairReplyReceiver). The service is already
-     * in the foreground when a real reply arrives, so this start is allowed; we guard anyway so a
-     * stray reply after the service has stopped can never crash the app.
+     * Deliver a reply to the running service (from PairReplyReceiver). The service is already in the
+     * foreground when a real reply arrives, so this start is allowed; we guard anyway so a stray
+     * reply after the service has stopped can never crash the app.
      */
     public static void deliverCode(Context context, @Nullable String code) {
         Intent i = new Intent(context, PairingService.class).setAction(ACTION_CODE).putExtra(KEY_CODE, code);
         try {
             context.startService(i);
         } catch (Throwable t) {
-            android.util.Log.w("ClipBridge", "pairing reply ignored (service not running): " + t);
+            android.util.Log.w(TAG, "pairing reply ignored (service not running): " + t);
         }
     }
 

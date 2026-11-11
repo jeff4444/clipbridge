@@ -77,12 +77,20 @@ Install the phone app from `android/app/build/outputs/apk/release/app-release.ap
 2. **On the phone:** open ClipBridge › **Set up ClipBridge**, then follow its three steps:
    1. *Turn on Wireless debugging* (Developer options). Tap Allow for your network.
    2. *Scan the Mac code* shown in step 1.
-   3. *Start pairing*, then in Settings tap **Pair device with pairing code**. Swipe down the
-      notification shade and type the six-digit code into the ClipBridge notification.
+   3. *Start pairing*. ClipBridge puts up a notification and opens Developer options. Go to
+      Wireless debugging › **Pair device with pairing code**, swipe down the notification shade and
+      type the six-digit code into the ClipBridge notification.
 
 The code is typed into a notification on purpose: Android stops its pairing server the moment
 Settings leaves the foreground, and the notification shade is the one place you can type without
-that happening.
+that happening. The app does not wait for the dialog or watch for it. The one thing it needs besides
+the code is the dialog's port, which Android picks afresh every time the dialog opens, so it looks
+that up at the moment you send the code. If the lookup ever fails, type the code followed by the
+port (the number after the colon in the dialog), for example `123456 34567`.
+
+If setup is interrupted after the phone has accepted the code, tap *Start pairing* again: the app is
+already authorised, so it finishes without a new code. *Run setup again* on the app's main screen
+repeats setup later, for example to pair with a different Mac.
 
 After this, nothing needs repeating. The pairing survives reboots and app updates.
 
@@ -259,8 +267,8 @@ PROTOCOL.md   wire format
 - After the Mac wakes from sleep, the phone reconnects within about five seconds while its screen is
   on; a copy made in that window is delivered as soon as it does.
 - One Mac per phone. Several phones can connect to one Mac.
-- Not yet exercised by hand: scanning the Mac's QR with the camera, and typing the pairing code into
-  the notification. Both paths were tested by injecting the same data through debug hooks.
+- Other phones on the same network with Wireless debugging switched on advertise the same services;
+  the app only ever uses the ones that resolve to its own address.
 - Android's developer-options "16 KB compatibility" warning may appear for the app's native
   libraries. Their load segments are 16 KB aligned and they are stored uncompressed and aligned in
   the APK; whether the remaining warning matters for Play has not been confirmed.

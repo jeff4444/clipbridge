@@ -53,6 +53,12 @@ enum LoginItem {
         return (dict[kSecCodeInfoTeamIdentifier as String] as? String)?.isEmpty == false
     }()
 
+    /// The plain LaunchAgent that install.sh writes for locally signed builds.
+    static var hasDeveloperLaunchAgent: Bool {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        return FileManager.default.fileExists(atPath: home + "/Library/LaunchAgents/dev.clipbridge.agent.plist")
+    }
+
     /// Is this copy somewhere it can stay? macOS runs an app opened straight from a disk image or
     /// from Downloads out of a temporary, randomised location, which is useless as a login item.
     static var isInstalled: Bool {

@@ -84,6 +84,13 @@ public final class MainActivity extends Activity {
         licences.setOnClickListener(v -> startActivity(new Intent(this, NoticesActivity.class)));
         col.addView(licences);
 
+        TextView again = text(13, false);
+        again.setText("Run setup again (new Mac, or pairing lost)");
+        again.setPadding(0, dp(8), 0, dp(8));
+        again.setAlpha(0.6f);
+        again.setOnClickListener(v -> startActivity(new Intent(this, SetupActivity.class)));
+        col.addView(again);
+
         ScrollView scroll = new ScrollView(this);
         scroll.addView(col);
         scroll.setOnApplyWindowInsetsListener((v, insets) -> {

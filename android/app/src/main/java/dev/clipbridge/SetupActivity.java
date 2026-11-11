@@ -72,9 +72,10 @@ public final class SetupActivity extends Activity implements PairingService.Obse
         scanButton.setOnClickListener(v -> startScan());
         col.addView(scanButton);
 
-        col.addView(step("3", "Start pairing here",
-                "Tap below, then tap “Pair device with pairing code” in Settings. "
-                        + "Swipe down and type the 6-digit code into the ClipBridge notification."));
+        col.addView(step("3", "Pair with a code",
+                "Tap below. ClipBridge puts up a notification and opens Developer options. Go to "
+                        + "Wireless debugging › “Pair device with pairing code”, then swipe down from the "
+                        + "top of the screen and type the 6-digit code into the ClipBridge notification."));
         primary = button("Start pairing");
         primary.setOnClickListener(v -> startPairing());
         col.addView(primary);
@@ -192,9 +193,9 @@ public final class SetupActivity extends Activity implements PairingService.Obse
     private void launchPairing() {
         pairingStarted = true;
         PairingService.start(this);
-        status.setText("Now tap “Pair device with pairing code” in Settings, then type the code into the notification.");
-        primary.setText("Pairing started — see the notification");
-        primary.setEnabled(false);
+        primary.setText("Open Developer options again");
+        // Give the notification a moment to appear, then take the user where the code is shown.
+        status.postDelayed(this::openDevSettings, 700);
     }
 
     @Override
@@ -208,11 +209,10 @@ public final class SetupActivity extends Activity implements PairingService.Obse
     public void onPhase(PairingService.Phase phase, String detail) {
         if (!pairingStarted && phase == PairingService.Phase.IDLE) return;
         switch (phase) {
-            case WAITING_FOR_DIALOG:
-                status.setText("Waiting for the pairing dialog… open “Pair device with pairing code” in Settings.");
-                break;
             case READY_FOR_CODE:
-                status.setText("Found it. Swipe down and type the 6-digit code into the ClipBridge notification.");
+                status.setText("Waiting for the code. In Settings › Developer options › Wireless debugging, tap "
+                        + "“Pair device with pairing code”, then swipe down and type the 6-digit code into "
+                        + "the ClipBridge notification.");
                 break;
             case PAIRING:
                 status.setText("Pairing…");
@@ -224,8 +224,8 @@ public final class SetupActivity extends Activity implements PairingService.Obse
                 break;
             case FAILED:
                 primary.setEnabled(true);
-                primary.setText("Try again");
-                status.setText("Pairing didn’t finish" + (detail != null ? ": " + detail : "") + ". Reopen the dialog and try again.");
+                primary.setText("Start pairing");
+                status.setText(detail != null ? detail : "Pairing didn’t finish. Try again.");
                 break;
             default:
                 break;

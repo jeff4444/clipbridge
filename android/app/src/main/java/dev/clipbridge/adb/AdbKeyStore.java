@@ -63,6 +63,12 @@ public final class AdbKeyStore {
     }
 
     @NonNull
+    /** True once a key pair has been generated (it may or may not have been paired yet). */
+    public static boolean exists(@NonNull Context context) {
+        File dir = new File(context.getFilesDir(), "adb");
+        return new File(dir, "key.pk8").isFile() && new File(dir, "cert.der").isFile();
+    }
+
     public PrivateKey getPrivateKey() {
         return privateKey;
     }

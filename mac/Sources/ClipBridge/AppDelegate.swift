@@ -82,9 +82,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, Server
 
     /// Runs in a copy the user opened by hand. Makes sure the login item exists and, when launchd
     /// then runs its own copy (the one that restarts after a crash), steps aside for it.
-    /// Whether this build looks after its own login item (see LoginItem.isTeamSigned).
+    /// Whether this copy looks after its own login item. A copy installed by install.sh does not:
+    /// that script gives locally signed builds a plain LaunchAgent (see LoginItem.isTeamSigned for
+    /// why). Every other copy does, including a locally signed one that was simply downloaded and
+    /// dragged into Applications, which would otherwise never start at login.
     private var selfRegisters: Bool {
-        LoginItem.hasBundledAgent && (LoginItem.isTeamSigned || config.selfRegister == true)
+        guard LoginItem.hasBundledAgent, config.selfRegister != false else { return false }
+        return LoginItem.isTeamSigned || config.selfRegister == true || !LoginItem.hasDeveloperLaunchAgent
     }
 
     /// `attempt` is 0 for a copy the user opened, and N in the Nth fresh copy started by a repair.

@@ -16,7 +16,23 @@ enum Pairing {
             "v": 1,
         ]
         let data = (try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys])) ?? Data()
-        return String(data: data, encoding: .utf8) ?? "{}"
+        return asciiJSON(String(data: data, encoding: .utf8) ?? "{}")
+    }
+
+    /// The same JSON with every non-ASCII character as a \uXXXX escape. The Mac's name is in here
+    /// and is often not ASCII ("Sam’s MacBook Pro"). Plain ASCII means every QR scanner decodes it
+    /// the same way instead of guessing a text encoding, and the phone can pass it through tools
+    /// that count characters rather than bytes.
+    static func asciiJSON(_ json: String) -> String {
+        var out = ""
+        for unit in json.utf16 {
+            if unit >= 0x20 && unit < 0x7F {
+                out.unicodeScalars.append(Unicode.Scalar(UInt8(unit)))
+            } else {
+                out += String(format: "\\u%04x", unit)
+            }
+        }
+        return out
     }
 
     /// Bonjour name first (survives IP changes), then current LAN IPv4 addresses.

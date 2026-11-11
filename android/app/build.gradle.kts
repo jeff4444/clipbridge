@@ -51,6 +51,11 @@ android {
         }
     }
 
+    // BuildConfig.VERSION_NAME, so the helper reports the same version as the app.
+    buildFeatures {
+        buildConfig = true
+    }
+
     // Third-party notices and licence texts, shown by NoticesActivity.
     sourceSets.getByName("main").assets.srcDir(rootProject.file("../legal"))
 
