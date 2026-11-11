@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Bundled at Contents/Library/LaunchAgents/dev.clipbridge.mac.agent.plist and registered by the
+     app itself (LoginItem.swift): start at login, restart after a crash, stay stopped after Quit. -->
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>dev.clipbridge.mac.agent</string>
+    <key>BundleProgram</key><string>Contents/MacOS/ClipBridge</string>
+    <key>AssociatedBundleIdentifiers</key>
+    <array><string>dev.clipbridge.mac</string></array>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key>
+    <dict><key>SuccessfulExit</key><false/></dict>
+    <key>ProcessType</key><string>Interactive</string>
+    <key>LimitLoadToSessionType</key><string>Aqua</string>
+    <key>EnvironmentVariables</key>
+    <dict><key>CLIPBRIDGE_AGENT</key><string>1</string></dict>
+</dict>
+</plist>

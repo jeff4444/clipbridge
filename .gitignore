@@ -1,0 +1,12 @@
+.DS_Store
+.env
+dist/
+mac/build/
+mac/.build*/
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+*.jks
+*.keystore
+keystore.properties
